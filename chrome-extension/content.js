@@ -9,6 +9,9 @@
     DOWNLOAD_DELAY_MS: 300,
     DOWNLOAD_FORMAT: "png",
     MIN_VISIBLE_PANEL_AREA: 100,
+    CONTROL_MARGIN: 8,
+    DRAG_THRESHOLD: 5,
+    CONTROL_POSITION_STORAGE_KEY: "douyin-image-downloader-control-position",
     CONTROL_ID: "douyin-image-downloader-controls",
     BUTTON_ID: "douyin-image-downloader-button",
     SELECT_BUTTON_ID: "douyin-image-downloader-select-button",
@@ -21,6 +24,9 @@
   const buttonState = {
     downloading: false,
     resetTimers: new Map(),
+    dragState: null,
+    suppressNextControlClick: false,
+    resizeHandlerBound: false,
   };
 
   function log(...args) {
@@ -59,6 +65,148 @@
       const button = document.getElementById(buttonId);
       if (button) button.disabled = disabled;
     });
+  }
+
+  function clamp(value, min, max) {
+    if (max < min) return min;
+    return Math.min(Math.max(value, min), max);
+  }
+
+  function readSavedControlPosition() {
+    try {
+      const rawPosition = window.localStorage.getItem(CONFIG.CONTROL_POSITION_STORAGE_KEY);
+      if (!rawPosition) return null;
+
+      const position = JSON.parse(rawPosition);
+      if (!Number.isFinite(position?.left) || !Number.isFinite(position?.top)) return null;
+
+      return position;
+    } catch (error) {
+      log("Unable to read saved control position:", error);
+      return null;
+    }
+  }
+
+  function saveControlPosition(left, top) {
+    try {
+      window.localStorage.setItem(CONFIG.CONTROL_POSITION_STORAGE_KEY, JSON.stringify({ left, top }));
+    } catch (error) {
+      log("Unable to save control position:", error);
+    }
+  }
+
+  function clampControlPosition(controls, left, top) {
+    const rect = controls.getBoundingClientRect();
+    const width = rect.width || 104;
+    const height = rect.height || 84;
+    const maxLeft = window.innerWidth - width - CONFIG.CONTROL_MARGIN;
+    const maxTop = window.innerHeight - height - CONFIG.CONTROL_MARGIN;
+
+    return {
+      left: clamp(left, CONFIG.CONTROL_MARGIN, maxLeft),
+      top: clamp(top, CONFIG.CONTROL_MARGIN, maxTop),
+    };
+  }
+
+  function setControlPosition(controls, left, top, shouldSave) {
+    const position = clampControlPosition(controls, left, top);
+
+    controls.style.left = `${position.left}px`;
+    controls.style.top = `${position.top}px`;
+    controls.style.right = "auto";
+    controls.style.bottom = "auto";
+
+    if (shouldSave) {
+      saveControlPosition(position.left, position.top);
+    }
+  }
+
+  function applySavedControlPosition(controls) {
+    const savedPosition = readSavedControlPosition();
+    if (!savedPosition) return;
+
+    window.requestAnimationFrame(() => {
+      setControlPosition(controls, savedPosition.left, savedPosition.top, false);
+    });
+  }
+
+  function keepControlsInViewport() {
+    const controls = document.getElementById(CONFIG.CONTROL_ID);
+    if (!controls || !controls.style.left || !controls.style.top) return;
+
+    const rect = controls.getBoundingClientRect();
+    setControlPosition(controls, rect.left, rect.top, true);
+  }
+
+  function ensureResizeHandler() {
+    if (buttonState.resizeHandlerBound) return;
+
+    buttonState.resizeHandlerBound = true;
+    window.addEventListener("resize", keepControlsInViewport);
+  }
+
+  function makeControlsDraggable(controls) {
+    if (controls.dataset.draggableReady === "true") return;
+
+    controls.dataset.draggableReady = "true";
+    controls.addEventListener("click", (event) => {
+      if (!buttonState.suppressNextControlClick) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+      buttonState.suppressNextControlClick = false;
+    }, true);
+
+    controls.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+
+      const rect = controls.getBoundingClientRect();
+      buttonState.dragState = {
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        startLeft: rect.left,
+        startTop: rect.top,
+        dragging: false,
+      };
+    });
+
+    document.addEventListener("pointermove", (event) => {
+      const state = buttonState.dragState;
+      if (!state || state.pointerId !== event.pointerId) return;
+
+      const deltaX = event.clientX - state.startX;
+      const deltaY = event.clientY - state.startY;
+
+      if (!state.dragging && Math.hypot(deltaX, deltaY) < CONFIG.DRAG_THRESHOLD) {
+        return;
+      }
+
+      state.dragging = true;
+      controls.classList.add("is-dragging");
+      event.preventDefault();
+      setControlPosition(controls, state.startLeft + deltaX, state.startTop + deltaY, false);
+    });
+
+    document.addEventListener("pointerup", finishDrag);
+    document.addEventListener("pointercancel", finishDrag);
+
+    function finishDrag(event) {
+      const state = buttonState.dragState;
+      if (!state || state.pointerId !== event.pointerId) return;
+
+      if (state.dragging) {
+        const rect = controls.getBoundingClientRect();
+        setControlPosition(controls, rect.left, rect.top, true);
+        buttonState.suppressNextControlClick = true;
+        window.setTimeout(() => {
+          buttonState.suppressNextControlClick = false;
+        }, 250);
+      }
+
+      controls.classList.remove("is-dragging");
+      buttonState.dragState = null;
+    }
   }
 
   function createActionButton(id, text, title, className, clickHandler) {
@@ -106,6 +254,8 @@
         display: flex;
         flex-direction: column;
         gap: 8px;
+        touch-action: none;
+        user-select: none;
       }
 
       #${CONFIG.CONTROL_ID} .douyin-image-downloader-action {
@@ -144,6 +294,11 @@
       #${CONFIG.CONTROL_ID} .douyin-image-downloader-action:disabled {
         cursor: progress;
         opacity: 0.72;
+      }
+
+      #${CONFIG.CONTROL_ID}.is-dragging,
+      #${CONFIG.CONTROL_ID}.is-dragging .douyin-image-downloader-action {
+        cursor: grabbing;
       }
 
       #${CONFIG.MODAL_ID} {
@@ -298,6 +453,8 @@
     controls.appendChild(downloadButton);
     controls.appendChild(selectButton);
     document.body.appendChild(controls);
+    applySavedControlPosition(controls);
+    makeControlsDraggable(controls);
   }
 
   function isVisible(element) {
@@ -775,6 +932,7 @@
       return;
     }
 
+    ensureResizeHandler();
     ensureButton();
 
     const observer = new MutationObserver(() => ensureButton());

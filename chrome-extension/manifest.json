@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Douyin Image Downloader",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Download Douyin image posts as PNG files using the current page DOM.",
   "permissions": ["downloads"],
   "host_permissions": [
